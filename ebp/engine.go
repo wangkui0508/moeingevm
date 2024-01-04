@@ -531,9 +531,9 @@ func (exec *txEngine) loadStandbyTxs(txRange *TxRange) (txBundle, ignoreList []t
 		var txToRun types.TxToRun
 		txToRun.FromBytes(bz)
 		if count, ok := exec.txRetryCount[txToRun.HashID]; ok && count >= exec.retryLimit {
-			txBundle = append(txBundle, txToRun)
-		} else {
 			ignoreList = append(ignoreList, txToRun)
+		} else {
+			txBundle = append(txBundle, txToRun)
 		}
 	}
 	ctx.Close(false)
