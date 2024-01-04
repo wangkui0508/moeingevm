@@ -3,6 +3,7 @@ package ebp
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -53,6 +54,9 @@ type txEngine struct {
 	// Used to check signatures
 	signer       gethtypes.Signer
 	currentBlock *types.BlockInfo
+
+	txRetryCount  map[common.Hash]int
+	retryLimit    int
 
 	cumulativeGasUsed   uint64
 	cumulativeFeeRefund *uint256.Int
@@ -173,7 +177,12 @@ func NewEbpTxExec(exeRoundCount, runnerNumber, parallelNum, defaultTxListCap int
 		committedTxs: make([]*types.Transaction, 0, defaultTxListCap),
 		signer:       s,
 		logger:       logger,
+		retryLimit:   math.MinInt,
 	}
+}
+
+func (exec *txEngine) SetRetryLimit(limit int) {
+	exec.retryLimit = limit
 }
 
 func (exec *txEngine) SetAotParam(aotDir string, aotReloadInterval int64) {
@@ -450,6 +459,7 @@ func (exec *txEngine) Execute(currBlock *types.BlockInfo) {
 	exec.cumulativeFeeRefund = uint256.NewInt(0)
 	exec.cumulativeGasFee = uint256.NewInt(0)
 	exec.currentBlock = currBlock
+	exec.txRetryCount = make(map[common.Hash]int, 4096)
 	startKey, endKey := exec.getStandbyQueueRange()
 	if startKey == endKey {
 		return
@@ -513,15 +523,18 @@ func (exec *txEngine) executeOneRound(txRange *TxRange, currBlock *types.BlockIn
 // Load at most 'exec.runnerNumber' transactions from standby queue
 func (exec *txEngine) loadStandbyTxs(txRange *TxRange) (txBundle []types.TxToRun) {
 	ctx := exec.cleanCtx.WithRbtCopy()
-	end := txRange.end
-	if end > txRange.start+uint64(exec.runnerNumber) { // load at most exec.runnerNumber
-		end = txRange.start + uint64(exec.runnerNumber)
-	}
-	txBundle = make([]types.TxToRun, end-txRange.start)
-	for i := txRange.start; i < end; i++ {
+	txBundle = make([]types.TxToRun, exec.runnerNumber)
+	idx := 0
+	for i := txRange.start; i < txRange.end && idx < exec.runnerNumber; i++ {
 		k := types.GetStandbyTxKey(i)
 		bz := ctx.Rbt.GetBaseStore().Get(k)
-		txBundle[i-txRange.start].FromBytes(bz)
+		var txToRun types.TxToRun
+		txToRun.FromBytes(bz)
+		if count, ok := exec.txRetryCount[txToRun.HashID]; ok && count >= exec.retryLimit {
+			continue
+		}
+		txBundle[idx] = txToRun
+		idx++
 	}
 	ctx.Close(false)
 	return
@@ -574,6 +587,12 @@ func (exec *txEngine) checkTxDepsAndUptStandbyQ(txRange *TxRange, txBundle []typ
 				break
 			}
 			Runners[idxAndBool.idx].Ctx.Rbt.CloseAndWriteBack(idxAndBool.canCommit)
+			txid := Runners[idxAndBool.idx].Tx.HashID
+			if count, ok := exec.txRetryCount[txid]; ok {
+				exec.txRetryCount[txid] = count + 1
+			} else {
+				exec.txRetryCount[txid] = 0
+			}
 		}
 		wg.Done()
 	}()
