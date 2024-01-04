@@ -177,7 +177,7 @@ func NewEbpTxExec(exeRoundCount, runnerNumber, parallelNum, defaultTxListCap int
 		committedTxs: make([]*types.Transaction, 0, defaultTxListCap),
 		signer:       s,
 		logger:       logger,
-		retryLimit:   math.MinInt,
+		retryLimit:   math.MaxInt,
 	}
 }
 
@@ -477,6 +477,9 @@ func (exec *txEngine) Execute(currBlock *types.BlockInfo) {
 			break
 		}
 		numTx := exec.executeOneRound(txRange, exec.currentBlock)
+		if numTx == 0 && exec.retryLimit != math.MaxInt {
+			break
+		}
 		for i := 0; i < numTx; i++ {
 			if Runners[i] == nil {
 				continue // the TX is not committable and needs re-execution
