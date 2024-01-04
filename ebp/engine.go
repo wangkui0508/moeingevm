@@ -587,6 +587,9 @@ func (exec *txEngine) checkTxDepsAndUptStandbyQ(txRange *TxRange, txBundle, igno
 				break
 			}
 			Runners[idxAndBool.idx].Ctx.Rbt.CloseAndWriteBack(idxAndBool.canCommit)
+			if idxAndBool.canCommit {
+				continue
+			}
 			txid := Runners[idxAndBool.idx].Tx.HashID
 			if count, ok := exec.txRetryCount[txid]; ok {
 				exec.txRetryCount[txid] = count + 1
