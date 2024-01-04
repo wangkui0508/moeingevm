@@ -514,27 +514,27 @@ func (exec *txEngine) setStandbyQueueRange(start, end uint64) {
 
 // Execute 'runnerNumber' transactions in parallel and commit the ones without any interdependency
 func (exec *txEngine) executeOneRound(txRange *TxRange, currBlock *types.BlockInfo) int {
-	txBundle := exec.loadStandbyTxs(txRange)
+	txBundle, ignoreList := exec.loadStandbyTxs(txRange)
 	kvCount := exec.runTxInParallel(txRange, txBundle, currBlock)
-	exec.checkTxDepsAndUptStandbyQ(txRange, txBundle, int(kvCount))
+	exec.checkTxDepsAndUptStandbyQ(txRange, txBundle, ignoreList, int(kvCount))
 	return len(txBundle)
 }
 
 // Load at most 'exec.runnerNumber' transactions from standby queue
-func (exec *txEngine) loadStandbyTxs(txRange *TxRange) (txBundle []types.TxToRun) {
+func (exec *txEngine) loadStandbyTxs(txRange *TxRange) (txBundle, ignoreList []types.TxToRun) {
 	ctx := exec.cleanCtx.WithRbtCopy()
-	txBundle = make([]types.TxToRun, exec.runnerNumber)
-	idx := 0
-	for i := txRange.start; i < txRange.end && idx < exec.runnerNumber; i++ {
+	txBundle = make([]types.TxToRun, 0, exec.runnerNumber)
+	ignoreList = make([]types.TxToRun, 0, exec.runnerNumber)
+	for i := txRange.start; i < txRange.end && len(txBundle) < exec.runnerNumber; i++ {
 		k := types.GetStandbyTxKey(i)
 		bz := ctx.Rbt.GetBaseStore().Get(k)
 		var txToRun types.TxToRun
 		txToRun.FromBytes(bz)
 		if count, ok := exec.txRetryCount[txToRun.HashID]; ok && count >= exec.retryLimit {
-			continue
+			txBundle = append(txBundle, txToRun)
+		} else {
+			ignoreList = append(ignoreList, txToRun)
 		}
-		txBundle[idx] = txToRun
-		idx++
 	}
 	ctx.Close(false)
 	return
@@ -575,7 +575,7 @@ type indexAndBool struct {
 
 // Check interdependency of TXs using 'touchedSet'. The ones with dependency with former committed TXs cannot
 // be committed and should be inserted back into the standby queue.
-func (exec *txEngine) checkTxDepsAndUptStandbyQ(txRange *TxRange, txBundle []types.TxToRun, kvCount int) {
+func (exec *txEngine) checkTxDepsAndUptStandbyQ(txRange *TxRange, txBundle, ignoreList []types.TxToRun, kvCount int) {
 	touchedSet := make(map[uint64]struct{}, kvCount)
 	var wg sync.WaitGroup
 	idxChan := make(chan indexAndBool, 10)
@@ -640,6 +640,11 @@ func (exec *txEngine) checkTxDepsAndUptStandbyQ(txRange *TxRange, txBundle []typ
 				exec.cumulativeGasFee.Add(exec.cumulativeGasFee, Runners[idx].GetGasFee())
 				Runners[idx] = nil
 			}
+		}
+		for _, tx := range ignoreList {
+			newK := types.GetStandbyTxKey(txRange.end)
+			txRange.end++
+			store.Set(newK, tx.ToBytes())
 		}
 	})
 }
